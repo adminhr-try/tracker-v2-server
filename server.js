@@ -14,7 +14,26 @@ const announcementRoutes = require('./routes/announcement');
 const todoRoutes = require('./routes/todo');
 
 const app = express();
-app.use(cors());
+
+// Allow the local Vite dev server plus whatever frontend origin is
+// currently configured (e.g. an ngrok tunnel while testing, or the deployed
+// site) — FRONTEND_URL comes from .env so it can be updated without a code
+// change. Requests with no Origin header (curl, server-to-server, same-origin
+// page loads) are always allowed since CORS only governs cross-origin fetches.
+const allowedOrigins = [
+  'http://localhost:5173',
+  'http://localhost:5174',
+  process.env.FRONTEND_URL,
+].filter(Boolean).map((url) => url.replace(/\/$/, ''));
+
+app.use(cors({
+  origin(origin, callback) {
+    if (!origin || allowedOrigins.includes(origin.replace(/\/$/, ''))) {
+      return callback(null, true);
+    }
+    callback(new Error(`CORS: origin ${origin} not allowed`));
+  },
+}));
 app.use(express.json({ limit: '3mb' })); // base64 photo uploads need more than the 100kb default
 
 connectDB();
