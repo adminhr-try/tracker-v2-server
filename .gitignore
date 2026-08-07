@@ -1,0 +1,6 @@
+node_modules/
+.env
+
+# Windows folder-settings artifacts
+desktop.ini
+Thumbs.db
