@@ -2,6 +2,9 @@ const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 const Department = require('../models/Department');
 const Employee = require('../models/Employee');
+const Attendance = require('../models/Attendance');
+const LeaveRequest = require('../models/LeaveRequest');
+const Todo = require('../models/Todo');
 
 const signToken = (id) =>
   jwt.sign({ id }, process.env.JWT_SECRET, { expiresIn: '7d' });
@@ -120,6 +123,45 @@ exports.listUsers = async (req, res) => {
       .select('name email role department employeeId')
       .sort({ name: 1 });
     res.status(200).json(users);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+// HR/CEO only — permanently removes a user: their account, Directory
+// listing, attendance history, leave requests they filed, and personal
+// to-dos. Cannot be undone.
+//
+// What this deliberately does NOT touch: leave/EOD requests where this
+// person was the APPROVER (not the requester) for someone else — those stay
+// as-is so the other person's history isn't corrupted, and company
+// announcements they posted (content is the org's, not tied to the account).
+exports.deleteUser = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (id === req.user._id.toString()) {
+      return res.status(400).json({ message: "You can't delete your own account" });
+    }
+
+    const user = await User.findById(id);
+    if (!user) return res.status(404).json({ message: 'User not found' });
+
+    await Promise.all([
+      Attendance.deleteMany({ user: id }),
+      LeaveRequest.deleteMany({ user: id }),
+      Todo.deleteMany({ user: id }),
+      Employee.deleteOne({ email: user.email }),
+      // Anyone reporting to this person loses that approver — their next
+      // request has nowhere to route until HR assigns them a new one.
+      User.updateMany({ reportingTo: id }, { $set: { reportingTo: null } }),
+      // Drop them out of whichever manager's team list included them.
+      User.updateMany({ teamMembers: id }, { $pull: { teamMembers: id } }),
+    ]);
+
+    await User.findByIdAndDelete(id);
+
+    res.status(200).json({ message: `${user.name} has been deleted.` });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }

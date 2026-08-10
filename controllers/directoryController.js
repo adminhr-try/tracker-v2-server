@@ -10,68 +10,63 @@ exports.listEmployees = async (req, res) => {
   }
 };
 
-// Next N birthdays, sorted by how soon they occur (wraps around the year end)
+// This month's birthdays only, sorted by day of month. Does NOT backfill
+// from other months to reach `limit` — if only 1 person has a birthday this
+// month, that's all that comes back.
 exports.upcomingBirthdays = async (req, res) => {
   try {
-    const limit = parseInt(req.query.limit) || 5;
+    const limit = parseInt(req.query.limit) || 50;
     const employees = await Employee.find({ dob: { $exists: true, $ne: null } });
 
-    const today = new Date();
-    const todayMD = today.getMonth() * 100 + today.getDate();
+    const currentMonth = new Date().getMonth();
 
-    const withNextDate = employees.map((e) => {
-      const dob = new Date(e.dob);
-      const md = dob.getMonth() * 100 + dob.getDate();
-      let daysUntil = md - todayMD;
-      if (daysUntil < 0) daysUntil += 1200; // push to next year, rough month*100 scale is fine for sorting
-      return { employee: e, md, daysUntil };
-    });
+    const thisMonth = employees
+      .filter((e) => new Date(e.dob).getMonth() === currentMonth)
+      .map((e) => ({ employee: e, day: new Date(e.dob).getDate() }))
+      .sort((a, b) => a.day - b.day)
+      .slice(0, limit)
+      .map((x) => ({
+        _id: x.employee._id,
+        name: x.employee.name,
+        designation: x.employee.designation,
+        dob: x.employee.dob,
+      }));
 
-    withNextDate.sort((a, b) => a.daysUntil - b.daysUntil);
-
-    const upcoming = withNextDate.slice(0, limit).map((x) => ({
-      _id: x.employee._id,
-      name: x.employee.name,
-      designation: x.employee.designation,
-      dob: x.employee.dob,
-    }));
-
-    res.status(200).json(upcoming);
+    res.status(200).json(thisMonth);
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
 };
 
-// Next N work anniversaries, sorted by how soon they occur, with years-completed count
+// This month's work anniversaries only, sorted by day of month, with
+// years-completed count. Same "no backfill from other months" rule as
+// upcomingBirthdays above.
 exports.upcomingAnniversaries = async (req, res) => {
   try {
-    const limit = parseInt(req.query.limit) || 5;
+    const limit = parseInt(req.query.limit) || 50;
     const employees = await Employee.find({ doj: { $exists: true, $ne: null } });
 
     const today = new Date();
-    const todayMD = today.getMonth() * 100 + today.getDate();
+    const currentMonth = today.getMonth();
+    const currentYear = today.getFullYear();
 
-    const withNextDate = employees.map((e) => {
-      const doj = new Date(e.doj);
-      const md = doj.getMonth() * 100 + doj.getDate();
-      let daysUntil = md - todayMD;
-      if (daysUntil < 0) daysUntil += 1200;
-      const nextAnniversaryYear = today.getFullYear() + (md < todayMD ? 1 : 0);
-      const years = nextAnniversaryYear - doj.getFullYear();
-      return { employee: e, md, daysUntil, years };
-    });
+    const thisMonth = employees
+      .filter((e) => new Date(e.doj).getMonth() === currentMonth)
+      .map((e) => {
+        const doj = new Date(e.doj);
+        return { employee: e, day: doj.getDate(), years: currentYear - doj.getFullYear() };
+      })
+      .sort((a, b) => a.day - b.day)
+      .slice(0, limit)
+      .map((x) => ({
+        _id: x.employee._id,
+        name: x.employee.name,
+        designation: x.employee.designation,
+        doj: x.employee.doj,
+        years: x.years,
+      }));
 
-    withNextDate.sort((a, b) => a.daysUntil - b.daysUntil);
-
-    const upcoming = withNextDate.slice(0, limit).map((x) => ({
-      _id: x.employee._id,
-      name: x.employee.name,
-      designation: x.employee.designation,
-      doj: x.employee.doj,
-      years: x.years,
-    }));
-
-    res.status(200).json(upcoming);
+    res.status(200).json(thisMonth);
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
