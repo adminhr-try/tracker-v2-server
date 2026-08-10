@@ -7,6 +7,7 @@ const {
   teamToday,
   orgToday,
   myMonthly,
+  employeeMonthly,
   todayStatus,
   dashboardSummary,
   myWfhDates,
@@ -29,6 +30,7 @@ router.get('/wfh-dates', myWfhDates);
 
 router.get('/team-today', requireRole(['employee', 'manager']), teamToday);
 router.get('/org-today', requireRole(['hr', 'ceo']), orgToday);
+router.get('/employee-monthly/:userId', requireRole(['hr', 'ceo']), employeeMonthly);
 
 router.get('/eod-pending-approvals', requireRole(['manager', 'hr', 'ceo']), pendingEodApprovals);
 router.get('/eod-approval-history', requireRole(['manager', 'hr', 'ceo']), eodApprovalHistory);

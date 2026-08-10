@@ -235,26 +235,39 @@ exports.teamToday = async (req, res) => {
   }
 };
 
-// HR/CEO: org-wide attendance today + summary counts
+// HR/CEO: org-wide attendance today + summary counts. Also returns the
+// actual employee list behind each of the Present/Absent/WFH counts, so the
+// dashboard cards can pop open "who's in this bucket" without a second call.
 exports.orgToday = async (req, res) => {
   try {
     const today = startOfDay();
-    const allUsers = await User.find({ isActive: true }).select('_id');
+    const allUsers = await User.find({ isActive: true }).select('name email role department');
     const records = await Attendance.find({ date: today }).populate('user', 'name email role department');
 
     const summary = { present: 0, absent: 0, onLeave: 0, wfh: 0, halfDay: 0 };
     const recordedUserIds = new Set(records.map((r) => r.user._id.toString()));
 
+    const presentUsers = [];
+    const wfhUsers = [];
     records.forEach((r) => {
-      if (r.status === 'present') summary.present++;
+      // WFH and in-office present are mutually exclusive buckets — a WFH
+      // check-in still carries status "present" on the record, so this must
+      // check workMode first or someone would be double-counted in both.
+      if (r.workMode === 'wfh') {
+        wfhUsers.push(r.user);
+        summary.wfh++;
+      } else if (r.status === 'present') {
+        presentUsers.push(r.user);
+        summary.present++;
+      }
       if (r.status === 'on-leave') summary.onLeave++;
       if (r.status === 'half-day') summary.halfDay++;
-      if (r.workMode === 'wfh') summary.wfh++;
     });
 
-    summary.absent = allUsers.filter((u) => !recordedUserIds.has(u._id.toString())).length;
+    const absentUsers = allUsers.filter((u) => !recordedUserIds.has(u._id.toString()));
+    summary.absent = absentUsers.length;
 
-    res.status(200).json({ summary, records });
+    res.status(200).json({ summary, records, presentUsers, absentUsers, wfhUsers });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -276,6 +289,32 @@ exports.myMonthly = async (req, res) => {
     }).sort({ date: 1 });
 
     res.status(200).json(records);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+// HR/CEO only — Administration > Attendance View. Same shape as myMonthly,
+// scoped to whichever employee they picked instead of themselves.
+exports.employeeMonthly = async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { month, year } = req.query;
+    const y = parseInt(year) || new Date().getFullYear();
+    const m = parseInt(month) || new Date().getMonth() + 1;
+
+    const employee = await User.findById(userId).select('name email role department employeeId');
+    if (!employee) return res.status(404).json({ message: 'Employee not found' });
+
+    const from = new Date(y, m - 1, 1);
+    const to = new Date(y, m, 0, 23, 59, 59);
+
+    const records = await Attendance.find({
+      user: userId,
+      date: { $gte: from, $lte: to },
+    }).sort({ date: 1 });
+
+    res.status(200).json({ employee, records });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }

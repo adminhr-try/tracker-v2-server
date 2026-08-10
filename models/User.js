@@ -18,6 +18,11 @@ const userSchema = new mongoose.Schema(
     department: { type: String, trim: true },
     designation: { type: String, trim: true },
 
+    // Same ID shown on Profile, Internal Directory, and Attendance — set
+    // once at account creation and kept in sync with the matching Employee
+    // directory entry (see authController.register).
+    employeeId: { type: String, trim: true, unique: true, sparse: true },
+
     // Profile photo — stored as a base64 data URI (small avatar images only)
     photoUrl: { type: String },
 
