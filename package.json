@@ -9,7 +9,8 @@
     "seed": "node seed.js",
     "seed:holidays": "node seedHolidays.js",
     "seed:directory": "node seedDirectory.js",
-    "seed:departments": "node seedDepartments.js"
+    "seed:departments": "node seedDepartments.js",
+    "fix:reporting": "node fixReportingRelationships.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

@@ -51,9 +51,12 @@ exports.register = async (req, res) => {
       reportingTo: resolvedReportingTo,
     });
 
-    // If this new user reports to a manager, add them to that manager's team
-    if (reportingTo) {
-      await User.findByIdAndUpdate(reportingTo, { $addToSet: { teamMembers: user._id } });
+    // If this new user reports to a manager, add them to that manager's team.
+    // Must check resolvedReportingTo (the actually-resolved approver id) —
+    // the Create User form always sends reportingToEmail, never a raw
+    // reportingTo id, so checking the raw param here silently never fired.
+    if (resolvedReportingTo) {
+      await User.findByIdAndUpdate(resolvedReportingTo, { $addToSet: { teamMembers: user._id } });
     }
 
     // Keep Internal Directory in sync — the new person shows up there
