@@ -13,7 +13,7 @@ const signToken = (id) =>
 exports.register = async (req, res) => {
   try {
     const {
-      name, email, password, role, department, designation,
+      name, email, password, role, department, designation, phone,
       employeeId, dob, doj, reportingTo, reportingToEmail,
     } = req.body;
 
@@ -46,6 +46,7 @@ exports.register = async (req, res) => {
 
     const user = await User.create({
       name, email, password, role, department, designation,
+      phone: phone || undefined,
       employeeId: employeeId || undefined,
       reportingTo: resolvedReportingTo,
     });
@@ -65,6 +66,7 @@ exports.register = async (req, res) => {
         name,
         designation,
         email,
+        phone: phone || undefined,
         dob: dob || undefined,
         doj: doj || undefined,
         createdBy: req.user._id,

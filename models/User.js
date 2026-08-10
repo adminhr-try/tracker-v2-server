@@ -17,6 +17,7 @@ const userSchema = new mongoose.Schema(
 
     department: { type: String, trim: true },
     designation: { type: String, trim: true },
+    phone: { type: String, trim: true },
 
     // Same ID shown on Profile, Internal Directory, and Attendance — set
     // once at account creation and kept in sync with the matching Employee
