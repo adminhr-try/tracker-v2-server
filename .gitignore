@@ -1,5 +1,5 @@
 node_modules/
-.env
+.env 
 
 # Windows folder-settings artifacts
 desktop.ini

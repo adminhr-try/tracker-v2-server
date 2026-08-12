@@ -1,6 +1,7 @@
 const LeaveRequest = require('../models/LeaveRequest');
 const User = require('../models/User');
 const Attendance = require('../models/Attendance');
+const Notification = require('../models/Notification');
 const { CAN_APPROVE } = require('../config/roles');
 
 const ANNUAL_QUOTA = { CL: 12, SL: 12, WFH: 12 };
@@ -55,9 +56,41 @@ exports.createRequest = async (req, res) => {
     if (!req.user.reportingTo) {
       return res.status(400).json({ message: 'No approver configured for your account. Contact admin.' });
     }
+    if (!['CL', 'SL'].includes(leaveType)) {
+      return res.status(400).json({ message: 'Invalid leave type' });
+    }
 
     // first-half/second-half only make sense for a single-day request
     const validDayPart = ['full', 'first-half', 'second-half'].includes(dayPart) ? dayPart : 'full';
+    const resolvedDayPart = fromDate === toDate ? validDayPart : 'full';
+
+    const requestedDays = daysUsed({
+      fromDate: new Date(fromDate),
+      toDate: new Date(toDate),
+      dayPart: resolvedDayPart,
+    });
+
+    // Enforce the annual quota against approved + still-pending requests —
+    // pending has to count too, or someone could stack far more than 12
+    // days of pending requests and have them all approved after the fact.
+    // (The balance shown on Leave & WFH only counts approved, per spec —
+    // this check is just the submission-time safety net, slightly stricter.)
+    const yearStart = new Date(new Date().getFullYear(), 0, 1);
+    const yearEnd = new Date(new Date().getFullYear(), 11, 31, 23, 59, 59);
+    const existingRequests = await LeaveRequest.find({
+      user: req.user._id,
+      leaveType,
+      status: { $in: ['approved', 'pending'] },
+      fromDate: { $gte: yearStart, $lte: yearEnd },
+    });
+    const alreadyCommitted = existingRequests.reduce((sum, r) => sum + daysUsed(r), 0);
+
+    if (alreadyCommitted + requestedDays > ANNUAL_QUOTA[leaveType]) {
+      const remaining = Math.max(0, ANNUAL_QUOTA[leaveType] - alreadyCommitted);
+      return res.status(400).json({
+        message: `This would exceed your annual ${leaveType} limit of ${ANNUAL_QUOTA[leaveType]} days (${remaining} remaining).`,
+      });
+    }
 
     const request = await LeaveRequest.create({
       user: req.user._id,
@@ -66,7 +99,7 @@ exports.createRequest = async (req, res) => {
       fromDate,
       toDate,
       reason,
-      dayPart: fromDate === toDate ? validDayPart : 'full',
+      dayPart: resolvedDayPart,
     });
 
     res.status(201).json(request);
@@ -105,7 +138,7 @@ exports.pendingApprovals = async (req, res) => {
 
 const reviewRequest = (newStatus) => async (req, res) => {
   try {
-    const request = await LeaveRequest.findById(req.params.id);
+    const request = await LeaveRequest.findById(req.params.id).populate('user', 'name');
     if (!request) return res.status(404).json({ message: 'Request not found' });
 
     if (request.approver.toString() !== req.user._id.toString()) {
@@ -119,6 +152,25 @@ const reviewRequest = (newStatus) => async (req, res) => {
     request.reviewedAt = new Date();
     request.reviewNote = req.body.reviewNote || '';
     await request.save();
+
+    // Notify the employee, and cascade one level up — e.g. when a manager
+    // approves, whoever the manager themselves reports to (typically HR)
+    // is notified too, so oversight isn't limited to only who clicked approve.
+    const verb = newStatus === 'approved' ? 'approved' : 'rejected';
+    await Notification.notify({
+      user: request.user._id,
+      type: `leave-${newStatus}`,
+      message: `Your ${request.leaveType} request was ${verb} by ${req.user.name}.`,
+      link: '/approval-history',
+    });
+    if (req.user.reportingTo) {
+      await Notification.notify({
+        user: req.user.reportingTo,
+        type: `leave-${newStatus}`,
+        message: `${req.user.name} ${verb} ${request.user.name}'s ${request.leaveType} request.`,
+        link: '/approval-history',
+      });
+    }
 
     // Mark attendance as on-leave for each day in range, if approved
     if (newStatus === 'approved') {
@@ -135,8 +187,8 @@ const reviewRequest = (newStatus) => async (req, res) => {
           day.setHours(0, 0, 0, 0);
           const dayStatus = request.dayPart !== 'full' ? 'half-day' : 'on-leave';
           return Attendance.findOneAndUpdate(
-            { user: request.user, date: day },
-            { user: request.user, date: day, status: dayStatus, dayPart: request.dayPart },
+            { user: request.user._id, date: day },
+            { user: request.user._id, date: day, status: dayStatus, dayPart: request.dayPart },
             { upsert: true, new: true }
           );
         })

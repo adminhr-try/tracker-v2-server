@@ -68,6 +68,7 @@ exports.register = async (req, res) => {
         employeeId: employeeId || undefined,
         name,
         designation,
+        department: department || undefined,
         email,
         phone: phone || undefined,
         dob: dob || undefined,
@@ -133,6 +134,129 @@ exports.listUsers = async (req, res) => {
   }
 };
 
+// HR/CEO only — powers the Edit User form. Merges the User account with its
+// matching Directory entry (dob/doj live on Employee, not User) and resolves
+// reportingTo to an email so it can pre-select the same "reports to" picker
+// Create User uses.
+exports.getUserProfile = async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id).select('-password');
+    if (!user) return res.status(404).json({ message: 'User not found' });
+
+    const [employee, manager] = await Promise.all([
+      Employee.findOne({ email: user.email }).select('dob doj'),
+      user.reportingTo ? User.findById(user.reportingTo).select('email') : null,
+    ]);
+
+    res.status(200).json({
+      _id: user._id,
+      name: user.name,
+      email: user.email,
+      phone: user.phone || '',
+      role: user.role,
+      department: user.department || '',
+      designation: user.designation || '',
+      employeeId: user.employeeId || '',
+      reportingToEmail: manager?.email || '',
+      dob: employee?.dob || null,
+      doj: employee?.doj || null,
+    });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+// HR/CEO only — edit an existing user's profile. Does NOT touch password
+// (a separate concern) or teamMembers (that's now computed on the fly from
+// reportingTo wherever it's needed — see attendanceController — rather than
+// kept in sync as a second source of truth, which is exactly what caused
+// the Team Presence bug fixed earlier).
+exports.updateUser = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const {
+      name, email, phone, role, department, designation,
+      employeeId, dob, doj, reportingToEmail,
+    } = req.body;
+
+    const user = await User.findById(id);
+    if (!user) return res.status(404).json({ message: 'User not found' });
+
+    const oldEmail = user.email;
+
+    if (email && email.toLowerCase() !== user.email) {
+      const emailTaken = await User.findOne({ email, _id: { $ne: id } });
+      if (emailTaken) return res.status(400).json({ message: 'Email already in use' });
+    }
+
+    if (employeeId && employeeId !== user.employeeId) {
+      const [dupUser, dupEmployee] = await Promise.all([
+        User.findOne({ employeeId, _id: { $ne: id } }),
+        Employee.findOne({ employeeId, email: { $ne: oldEmail } }),
+      ]);
+      if (dupUser || dupEmployee) {
+        return res.status(400).json({ message: `Employee ID ${employeeId} is already in use` });
+      }
+    }
+
+    let resolvedReportingTo = user.reportingTo;
+    if (reportingToEmail === '') {
+      resolvedReportingTo = null;
+    } else if (reportingToEmail) {
+      const approver = await User.findOne({ email: reportingToEmail });
+      if (!approver) return res.status(400).json({ message: `No user found with email ${reportingToEmail}` });
+      if (approver._id.toString() === id) {
+        return res.status(400).json({ message: 'A user cannot report to themselves' });
+      }
+      resolvedReportingTo = approver._id;
+    }
+
+    if (department) await Department.ensureExists(department);
+
+    if (name !== undefined) user.name = name;
+    if (email) user.email = email;
+    if (phone !== undefined) user.phone = phone || undefined;
+    if (role) user.role = role;
+    if (department !== undefined) user.department = department || undefined;
+    if (designation !== undefined) user.designation = designation || undefined;
+    if (employeeId !== undefined) user.employeeId = employeeId || undefined;
+    user.reportingTo = resolvedReportingTo;
+
+    await user.save();
+
+    // Keep Internal Directory in sync — matched by the OLD email (in case it
+    // just changed), updated to the new data including the new email.
+    // dob/doj only overwrite if the request actually sent them, so editing
+    // unrelated fields never blanks out an existing birthday/join date.
+    const employeeUpdate = {
+      employeeId: user.employeeId || undefined,
+      name: user.name,
+      designation: user.designation,
+      department: user.department || undefined,
+      email: user.email,
+      phone: user.phone || undefined,
+    };
+    if (dob !== undefined) employeeUpdate.dob = dob || undefined;
+    if (doj !== undefined) employeeUpdate.doj = doj || undefined;
+
+    await Employee.findOneAndUpdate({ email: oldEmail }, employeeUpdate, {
+      upsert: true,
+      new: true,
+      setDefaultsOnInsert: true,
+    });
+
+    res.status(200).json({
+      _id: user._id,
+      name: user.name,
+      email: user.email,
+      role: user.role,
+      employeeId: user.employeeId || null,
+    });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
 // HR/CEO only — permanently removes a user: their account, Directory
 // listing, attendance history, leave requests they filed, and personal
 // to-dos. Cannot be undone.
@@ -167,6 +291,34 @@ exports.deleteUser = async (req, res) => {
     await User.findByIdAndDelete(id);
 
     res.status(200).json({ message: `${user.name} has been deleted.` });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+// Any logged-in user — change their own password. Requires the current
+// password (not just being logged in) so a session left open on a shared
+// device can't be turned into a full account takeover.
+exports.changePassword = async (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({ message: 'Current and new password are required' });
+    }
+    if (newPassword.length < 6) {
+      return res.status(400).json({ message: 'New password must be at least 6 characters' });
+    }
+
+    const user = await User.findById(req.user._id);
+    const matches = await user.comparePassword(currentPassword);
+    if (!matches) {
+      return res.status(401).json({ message: 'Current password is incorrect' });
+    }
+
+    user.password = newPassword; // pre-save hook re-hashes it
+    await user.save();
+
+    res.status(200).json({ message: 'Password updated.' });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }

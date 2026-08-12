@@ -7,11 +7,13 @@ const connectDB = require('./config/db');
 const authRoutes = require('./routes/auth');
 const attendanceRoutes = require('./routes/attendance');
 const leaveRoutes = require('./routes/leave');
+const regularisationRoutes = require('./routes/regularisation');
 const holidayRoutes = require('./routes/holiday');
 const departmentRoutes = require('./routes/department');
 const directoryRoutes = require('./routes/directory');
 const announcementRoutes = require('./routes/announcement');
 const todoRoutes = require('./routes/todo');
+const notificationRoutes = require('./routes/notifications');
 
 const app = express();
 
@@ -41,11 +43,13 @@ connectDB();
 app.use('/api/auth', authRoutes);
 app.use('/api/attendance', attendanceRoutes);
 app.use('/api/leave', leaveRoutes);
+app.use('/api/regularisation', regularisationRoutes);
 app.use('/api/holidays', holidayRoutes);
 app.use('/api/departments', departmentRoutes);
 app.use('/api/directory', directoryRoutes);
 app.use('/api/announcements', announcementRoutes);
 app.use('/api/todos', todoRoutes);
+app.use('/api/notifications', notificationRoutes);
 
 // Serve the built frontend (Vite React app) from the same server, so the
 // whole app runs from one URL (http://localhost:5000) instead of a separate

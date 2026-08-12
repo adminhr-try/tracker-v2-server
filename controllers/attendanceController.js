@@ -1,5 +1,6 @@
 const Attendance = require('../models/Attendance');
 const User = require('../models/User');
+const Notification = require('../models/Notification');
 const { CAN_APPROVE } = require('../config/roles');
 
 const startOfDay = (d = new Date()) => {
@@ -18,24 +19,46 @@ exports.todayStatus = async (req, res) => {
   }
 };
 
+// Same annual cap as CL/SL leave — see leaveController.js's ANNUAL_QUOTA.
+const ANNUAL_WFH_QUOTA = 12;
+
 exports.checkIn = async (req, res) => {
   try {
     const { workMode, dayPart } = req.body; // workMode: 'office' | 'wfh'; dayPart: 'full' | 'first-half' | 'second-half'
     const today = startOfDay();
     const validDayPart = ['full', 'first-half', 'second-half'].includes(dayPart) ? dayPart : 'full';
+    const resolvedWorkMode = workMode === 'wfh' ? 'wfh' : 'office';
 
     const existing = await Attendance.findOne({ user: req.user._id, date: today });
     if (existing && existing.checkIn) {
       return res.status(400).json({ message: 'Already checked in today' });
     }
 
+    if (resolvedWorkMode === 'wfh') {
+      const yearStart = new Date(today.getFullYear(), 0, 1);
+      const yearEnd = new Date(today.getFullYear(), 11, 31, 23, 59, 59);
+      const wfhRecords = await Attendance.find({
+        user: req.user._id,
+        workMode: 'wfh',
+        date: { $gte: yearStart, $lte: yearEnd, $ne: today }, // today counted separately below
+      });
+      const wfhUsed = wfhRecords.reduce((sum, r) => sum + (r.dayPart !== 'full' ? 0.5 : 1), 0);
+      const thisDayAmount = validDayPart !== 'full' ? 0.5 : 1;
+
+      if (wfhUsed + thisDayAmount > ANNUAL_WFH_QUOTA) {
+        return res.status(400).json({
+          message: `This would exceed your annual WFH limit of ${ANNUAL_WFH_QUOTA} days (${Math.max(0, ANNUAL_WFH_QUOTA - wfhUsed)} remaining).`,
+        });
+      }
+    }
+
     const record = existing
-      ? Object.assign(existing, { checkIn: new Date(), workMode: workMode || 'office', dayPart: validDayPart })
+      ? Object.assign(existing, { checkIn: new Date(), workMode: resolvedWorkMode, dayPart: validDayPart })
       : new Attendance({
           user: req.user._id,
           date: today,
           checkIn: new Date(),
-          workMode: workMode || 'office',
+          workMode: resolvedWorkMode,
           dayPart: validDayPart,
         });
 
@@ -121,7 +144,7 @@ exports.pendingEodApprovals = async (req, res) => {
 
 const reviewEod = (newStatus) => async (req, res) => {
   try {
-    const record = await Attendance.findById(req.params.id);
+    const record = await Attendance.findById(req.params.id).populate('user', 'name');
     if (!record || !record.eodReport?.submitted) {
       return res.status(404).json({ message: 'EOD report not found' });
     }
@@ -135,6 +158,26 @@ const reviewEod = (newStatus) => async (req, res) => {
     record.eodReport.status = newStatus;
     record.eodReport.reviewedAt = new Date();
     await record.save();
+
+    // Notify the employee, and cascade one level up — e.g. when a manager
+    // approves, whoever the manager themselves reports to (typically HR)
+    // is notified too, so oversight isn't limited to only who clicked approve.
+    const verb = newStatus === 'approved' ? 'approved' : 'rejected';
+    const dateLabel = record.date.toISOString().slice(0, 10);
+    await Notification.notify({
+      user: record.user._id,
+      type: `eod-${newStatus}`,
+      message: `Your EOD report for ${dateLabel} was ${verb} by ${req.user.name}.`,
+      link: '/approval-history',
+    });
+    if (req.user.reportingTo) {
+      await Notification.notify({
+        user: req.user.reportingTo,
+        type: `eod-${newStatus}`,
+        message: `${req.user.name} ${verb} ${record.user.name}'s EOD report.`,
+        link: '/approval-history',
+      });
+    }
 
     res.status(200).json(record);
   } catch (err) {
@@ -194,8 +237,12 @@ exports.dashboardSummary = async (req, res) => {
     if (isOrgWide) {
       userIds = (await User.find({ isActive: true }).select('_id')).map((u) => u._id);
     } else {
-      const me = await User.findById(req.user._id).populate('teamMembers', '_id');
-      userIds = [req.user._id, ...(me.teamMembers || []).map((m) => m._id)];
+      // Computed directly from reportingTo (authoritative) rather than the
+      // teamMembers array, which can drift out of sync — see
+      // fixReportingRelationships.js for why. For a plain employee this is
+      // just themselves, since nobody reports to them.
+      const reports = await User.find({ reportingTo: req.user._id, isActive: true }).select('_id');
+      userIds = [req.user._id, ...reports.map((u) => u._id)];
     }
 
     const now = new Date();
@@ -218,18 +265,53 @@ exports.dashboardSummary = async (req, res) => {
   }
 };
 
+// "Today's Team" — scope and detail depend on role (HR/CEO don't hit this
+// endpoint at all; they get the full org via orgToday, with times):
+//  - employee: peers who share the same manager, status only, no punch-in/out
+//    time
+//  - manager: their direct reports, with full punch-in/out time
 exports.teamToday = async (req, res) => {
   try {
-    const manager = await User.findById(req.user._id).populate('teamMembers', 'name email role');
-    const teamIds = manager.teamMembers.map((m) => m._id);
-
     const today = startOfDay();
+    const me = req.user;
+    const isEmployee = me.role === 'employee';
+
+    let teamIds;
+    if (isEmployee) {
+      if (!me.reportingTo) return res.status(200).json([]);
+      const peers = await User.find({
+        reportingTo: me.reportingTo,
+        isActive: true,
+        _id: { $ne: me._id },
+      }).select('_id');
+      teamIds = peers.map((u) => u._id);
+    } else {
+      // Manager — computed directly from reportingTo (authoritative) rather
+      // than the teamMembers array, which can drift out of sync — see
+      // fixReportingRelationships.js for why.
+      const reports = await User.find({ reportingTo: me._id, isActive: true }).select('_id');
+      teamIds = reports.map((u) => u._id);
+    }
+
     const records = await Attendance.find({ user: { $in: teamIds }, date: today }).populate(
       'user',
-      'name email role'
+      'name email role department'
     );
 
-    res.status(200).json(records);
+    if (!isEmployee) {
+      return res.status(200).json(records);
+    }
+
+    // Employee view — strip punch-in/out time per the role-based visibility
+    // rules; only managers and HR/CEO see timing detail.
+    const stripped = records.map((r) => ({
+      _id: r._id,
+      user: r.user,
+      workMode: r.workMode,
+      dayPart: r.dayPart,
+      status: r.status,
+    }));
+    res.status(200).json(stripped);
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
