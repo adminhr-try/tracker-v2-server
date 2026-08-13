@@ -5,6 +5,7 @@ const Employee = require('../models/Employee');
 const Attendance = require('../models/Attendance');
 const LeaveRequest = require('../models/LeaveRequest');
 const Todo = require('../models/Todo');
+const { CAN_APPROVE } = require('../config/roles');
 
 const signToken = (id) =>
   jwt.sign({ id }, process.env.JWT_SECRET, { expiresIn: '7d' });
@@ -37,6 +38,12 @@ exports.register = async (req, res) => {
     if (!resolvedReportingTo && reportingToEmail) {
       const approver = await User.findOne({ email: reportingToEmail });
       if (!approver) return res.status(400).json({ message: `No user found with email ${reportingToEmail}` });
+      // Whoever this resolves to has to actually be able to approve
+      // requests — otherwise this person's leave/EOD requests would route
+      // to someone who can never act on them and sit pending forever.
+      if (!CAN_APPROVE.includes(approver.role)) {
+        return res.status(400).json({ message: `${approver.name} cannot be set as an approver (role: ${approver.role})` });
+      }
       resolvedReportingTo = approver._id;
     }
 
@@ -207,6 +214,9 @@ exports.updateUser = async (req, res) => {
       if (!approver) return res.status(400).json({ message: `No user found with email ${reportingToEmail}` });
       if (approver._id.toString() === id) {
         return res.status(400).json({ message: 'A user cannot report to themselves' });
+      }
+      if (!CAN_APPROVE.includes(approver.role)) {
+        return res.status(400).json({ message: `${approver.name} cannot be set as an approver (role: ${approver.role})` });
       }
       resolvedReportingTo = approver._id;
     }

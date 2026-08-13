@@ -9,6 +9,7 @@ const {
   monthRangeIST,
   yearRangeIST,
 } = require('../utils/dateUtils');
+const { resolveApprover } = require('../utils/approverUtils');
 
 exports.todayStatus = async (req, res) => {
   try {
@@ -102,16 +103,18 @@ exports.submitEodReport = async (req, res) => {
     const record = await Attendance.findOne({ user: req.user._id, date: today });
     if (!record) return res.status(400).json({ message: 'No attendance record for today yet' });
 
-    // If the user has no one above them (e.g. CEO), there's no one to approve it —
-    // auto-approve so it doesn't sit pending forever.
-    const hasApprover = !!req.user.reportingTo;
+    // Same approver resolution as leave/regularisation — falls back to HR
+    // (or CEO, if this user IS HR) when there's no reportingTo. Only truly
+    // auto-approves if not even that fallback finds anyone, so it doesn't
+    // sit pending forever with nobody able to review it.
+    const approverId = await resolveApprover(req.user);
     record.eodReport = {
       submitted: true,
       content,
       submittedAt: new Date(),
-      approver: hasApprover ? req.user.reportingTo : undefined,
-      status: hasApprover ? 'pending' : 'approved',
-      reviewedAt: hasApprover ? undefined : new Date(),
+      approver: approverId || undefined,
+      status: approverId ? 'pending' : 'approved',
+      reviewedAt: approverId ? undefined : new Date(),
     };
     await record.save();
 
@@ -196,11 +199,15 @@ exports.eodApprovalHistory = async (req, res) => {
       return res.status(403).json({ message: 'You do not approve requests' });
     }
 
-    const records = await Attendance.find({
-      'eodReport.approver': req.user._id,
-      'eodReport.status': { $in: ['approved', 'rejected'] },
-    })
+    // HR/CEO get the full org-wide history — everyone else only sees
+    // decisions they personally made.
+    const isOrgWide = ['hr', 'ceo'].includes(req.user.role);
+    const filter = { 'eodReport.status': { $in: ['approved', 'rejected'] } };
+    if (!isOrgWide) filter['eodReport.approver'] = req.user._id;
+
+    const records = await Attendance.find(filter)
       .populate('user', 'name email role department')
+      .populate('eodReport.approver', 'name')
       .sort({ 'eodReport.reviewedAt': -1 });
 
     res.status(200).json(records);

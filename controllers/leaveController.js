@@ -240,11 +240,15 @@ exports.approvalHistory = async (req, res) => {
       return res.status(403).json({ message: 'You do not approve requests' });
     }
 
-    const requests = await LeaveRequest.find({
-      approver: req.user._id,
-      status: { $in: ['approved', 'rejected'] },
-    })
+    // HR/CEO get the full org-wide history — everyone else only sees
+    // decisions they personally made.
+    const isOrgWide = ['hr', 'ceo'].includes(req.user.role);
+    const filter = { status: { $in: ['approved', 'rejected'] } };
+    if (!isOrgWide) filter.approver = req.user._id;
+
+    const requests = await LeaveRequest.find(filter)
       .populate('user', 'name email role department')
+      .populate('approver', 'name')
       .sort({ reviewedAt: -1 });
 
     res.status(200).json(requests);
