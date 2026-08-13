@@ -2,12 +2,7 @@ const Regularisation = require('../models/Regularisation');
 const Attendance = require('../models/Attendance');
 const Notification = require('../models/Notification');
 const { CAN_APPROVE } = require('../config/roles');
-
-const startOfDay = (d) => {
-  const x = new Date(d);
-  x.setHours(0, 0, 0, 0);
-  return x;
-};
+const { startOfDayIST: startOfDay, getISTYear, yearRangeIST } = require('../utils/dateUtils');
 
 // Same annual cap as CL/SL leave and the WFH check-in — see leaveController.js's
 // ANNUAL_QUOTA. Only relevant here when approval would *create* a fresh WFH
@@ -103,12 +98,11 @@ const reviewRequest = (newStatus) => async (req, res) => {
     if (newStatus === 'approved' && request.workMode === 'wfh') {
       const alreadyExists = await Attendance.findOne({ user: request.user._id, date: request.date });
       if (!alreadyExists) {
-        const yearStart = new Date(request.date.getFullYear(), 0, 1);
-        const yearEnd = new Date(request.date.getFullYear(), 11, 31, 23, 59, 59);
+        const { from: yearStart, to: yearEnd } = yearRangeIST(getISTYear(request.date));
         const wfhRecords = await Attendance.find({
           user: request.user._id,
           workMode: 'wfh',
-          date: { $gte: yearStart, $lte: yearEnd },
+          date: { $gte: yearStart, $lt: yearEnd },
         });
         const wfhUsed = wfhRecords.reduce((sum, r) => sum + (r.dayPart !== 'full' ? 0.5 : 1), 0);
         if (wfhUsed + 1 > ANNUAL_WFH_QUOTA) {

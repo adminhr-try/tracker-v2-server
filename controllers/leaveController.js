@@ -3,6 +3,7 @@ const User = require('../models/User');
 const Attendance = require('../models/Attendance');
 const Notification = require('../models/Notification');
 const { CAN_APPROVE } = require('../config/roles');
+const { startOfDayIST, getISTYear, yearRangeIST } = require('../utils/dateUtils');
 
 const ANNUAL_QUOTA = { CL: 12, SL: 12, WFH: 12 };
 
@@ -18,13 +19,12 @@ function daysUsed(request) {
 // Current-year leave/WFH balance for the logged-in user, shown in the sidebar
 exports.leaveBalance = async (req, res) => {
   try {
-    const yearStart = new Date(new Date().getFullYear(), 0, 1);
-    const yearEnd = new Date(new Date().getFullYear(), 11, 31, 23, 59, 59);
+    const { from: yearStart, to: yearEnd } = yearRangeIST(getISTYear());
 
     const approvedLeaves = await LeaveRequest.find({
       user: req.user._id,
       status: 'approved',
-      fromDate: { $gte: yearStart, $lte: yearEnd },
+      fromDate: { $gte: yearStart, $lt: yearEnd },
     });
 
     const used = { CL: 0, SL: 0 };
@@ -35,7 +35,7 @@ exports.leaveBalance = async (req, res) => {
     const wfhRecords = await Attendance.find({
       user: req.user._id,
       workMode: 'wfh',
-      date: { $gte: yearStart, $lte: yearEnd },
+      date: { $gte: yearStart, $lt: yearEnd },
     });
     const wfhUsed = wfhRecords.reduce((sum, r) => sum + (r.dayPart !== 'full' ? 0.5 : 1), 0);
 
@@ -75,13 +75,12 @@ exports.createRequest = async (req, res) => {
     // days of pending requests and have them all approved after the fact.
     // (The balance shown on Leave & WFH only counts approved, per spec —
     // this check is just the submission-time safety net, slightly stricter.)
-    const yearStart = new Date(new Date().getFullYear(), 0, 1);
-    const yearEnd = new Date(new Date().getFullYear(), 11, 31, 23, 59, 59);
+    const { from: yearStart, to: yearEnd } = yearRangeIST(getISTYear());
     const existingRequests = await LeaveRequest.find({
       user: req.user._id,
       leaveType,
       status: { $in: ['approved', 'pending'] },
-      fromDate: { $gte: yearStart, $lte: yearEnd },
+      fromDate: { $gte: yearStart, $lt: yearEnd },
     });
     const alreadyCommitted = existingRequests.reduce((sum, r) => sum + daysUsed(r), 0);
 
@@ -184,11 +183,11 @@ const reviewRequest = (newStatus) => async (req, res) => {
 
       await Promise.all(
         days.map((day) => {
-          day.setHours(0, 0, 0, 0);
+          const dayKey = startOfDayIST(day);
           const dayStatus = request.dayPart !== 'full' ? 'half-day' : 'on-leave';
           return Attendance.findOneAndUpdate(
-            { user: request.user._id, date: day },
-            { user: request.user._id, date: day, status: dayStatus, dayPart: request.dayPart },
+            { user: request.user._id, date: dayKey },
+            { user: request.user._id, date: dayKey, status: dayStatus, dayPart: request.dayPart },
             { upsert: true, new: true }
           );
         })
@@ -213,14 +212,13 @@ exports.leaveDatesByType = async (req, res) => {
       return res.status(400).json({ message: 'Invalid leave type' });
     }
 
-    const yearStart = new Date(new Date().getFullYear(), 0, 1);
-    const yearEnd = new Date(new Date().getFullYear(), 11, 31, 23, 59, 59);
+    const { from: yearStart, to: yearEnd } = yearRangeIST(getISTYear());
 
     const requests = await LeaveRequest.find({
       user: req.user._id,
       leaveType: type,
       status: 'approved',
-      fromDate: { $gte: yearStart, $lte: yearEnd },
+      fromDate: { $gte: yearStart, $lt: yearEnd },
     }).sort({ fromDate: -1 });
 
     res.status(200).json(requests);

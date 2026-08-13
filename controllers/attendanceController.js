@@ -2,12 +2,13 @@ const Attendance = require('../models/Attendance');
 const User = require('../models/User');
 const Notification = require('../models/Notification');
 const { CAN_APPROVE } = require('../config/roles');
-
-const startOfDay = (d = new Date()) => {
-  const x = new Date(d);
-  x.setHours(0, 0, 0, 0);
-  return x;
-};
+const {
+  startOfDayIST: startOfDay,
+  getISTYear,
+  getISTMonth,
+  monthRangeIST,
+  yearRangeIST,
+} = require('../utils/dateUtils');
 
 exports.todayStatus = async (req, res) => {
   try {
@@ -35,12 +36,11 @@ exports.checkIn = async (req, res) => {
     }
 
     if (resolvedWorkMode === 'wfh') {
-      const yearStart = new Date(today.getFullYear(), 0, 1);
-      const yearEnd = new Date(today.getFullYear(), 11, 31, 23, 59, 59);
+      const { from: yearStart, to: yearEnd } = yearRangeIST(getISTYear(today));
       const wfhRecords = await Attendance.find({
         user: req.user._id,
         workMode: 'wfh',
-        date: { $gte: yearStart, $lte: yearEnd, $ne: today }, // today counted separately below
+        date: { $gte: yearStart, $lt: yearEnd, $ne: today }, // today counted separately below
       });
       const wfhUsed = wfhRecords.reduce((sum, r) => sum + (r.dayPart !== 'full' ? 0.5 : 1), 0);
       const thisDayAmount = validDayPart !== 'full' ? 0.5 : 1;
@@ -215,13 +215,12 @@ exports.eodApprovalHistory = async (req, res) => {
 // All WFH check-ins this year — for the clickable "WFH 05/12" sidebar link
 exports.myWfhDates = async (req, res) => {
   try {
-    const yearStart = new Date(new Date().getFullYear(), 0, 1);
-    const yearEnd = new Date(new Date().getFullYear(), 11, 31, 23, 59, 59);
+    const { from: yearStart, to: yearEnd } = yearRangeIST(getISTYear());
 
     const records = await Attendance.find({
       user: req.user._id,
       workMode: 'wfh',
-      date: { $gte: yearStart, $lte: yearEnd },
+      date: { $gte: yearStart, $lt: yearEnd },
     }).sort({ date: -1 });
 
     res.status(200).json(records);
@@ -245,11 +244,9 @@ exports.dashboardSummary = async (req, res) => {
       userIds = [req.user._id, ...reports.map((u) => u._id)];
     }
 
-    const now = new Date();
-    const from = new Date(now.getFullYear(), now.getMonth(), 1);
-    const to = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
+    const { from, to } = monthRangeIST(getISTYear(), getISTMonth());
 
-    const records = await Attendance.find({ user: { $in: userIds }, date: { $gte: from, $lte: to } });
+    const records = await Attendance.find({ user: { $in: userIds }, date: { $gte: from, $lt: to } });
 
     const summary = { present: 0, absent: 0, leave: 0, wfh: 0 };
     records.forEach((r) => {
@@ -359,15 +356,14 @@ exports.orgToday = async (req, res) => {
 exports.myMonthly = async (req, res) => {
   try {
     const { month, year } = req.query; // month: 1-12
-    const y = parseInt(year) || new Date().getFullYear();
-    const m = parseInt(month) || new Date().getMonth() + 1;
+    const y = parseInt(year) || getISTYear();
+    const m = parseInt(month) || getISTMonth();
 
-    const from = new Date(y, m - 1, 1);
-    const to = new Date(y, m, 0, 23, 59, 59);
+    const { from, to } = monthRangeIST(y, m);
 
     const records = await Attendance.find({
       user: req.user._id,
-      date: { $gte: from, $lte: to },
+      date: { $gte: from, $lt: to },
     }).sort({ date: 1 });
 
     res.status(200).json(records);
@@ -382,18 +378,17 @@ exports.employeeMonthly = async (req, res) => {
   try {
     const { userId } = req.params;
     const { month, year } = req.query;
-    const y = parseInt(year) || new Date().getFullYear();
-    const m = parseInt(month) || new Date().getMonth() + 1;
+    const y = parseInt(year) || getISTYear();
+    const m = parseInt(month) || getISTMonth();
 
     const employee = await User.findById(userId).select('name email role department employeeId');
     if (!employee) return res.status(404).json({ message: 'Employee not found' });
 
-    const from = new Date(y, m - 1, 1);
-    const to = new Date(y, m, 0, 23, 59, 59);
+    const { from, to } = monthRangeIST(y, m);
 
     const records = await Attendance.find({
       user: userId,
-      date: { $gte: from, $lte: to },
+      date: { $gte: from, $lt: to },
     }).sort({ date: 1 });
 
     res.status(200).json({ employee, records });
