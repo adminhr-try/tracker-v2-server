@@ -3,6 +3,7 @@ const Attendance = require('../models/Attendance');
 const Notification = require('../models/Notification');
 const { CAN_APPROVE } = require('../config/roles');
 const { startOfDayIST: startOfDay, getISTYear, yearRangeIST } = require('../utils/dateUtils');
+const { resolveApprover } = require('../utils/approverUtils');
 
 // Same annual cap as CL/SL leave and the WFH check-in — see leaveController.js's
 // ANNUAL_QUOTA. Only relevant here when approval would *create* a fresh WFH
@@ -25,13 +26,14 @@ exports.createRequest = async (req, res) => {
     if (resolvedWorkMode === 'wfh' && !eodContent?.trim()) {
       return res.status(400).json({ message: 'An EOD report is required for a Work From Home day.' });
     }
-    if (!req.user.reportingTo) {
+    const approverId = await resolveApprover(req.user);
+    if (!approverId) {
       return res.status(400).json({ message: 'No approver configured for your account. Contact admin.' });
     }
 
     const request = await Regularisation.create({
       user: req.user._id,
-      approver: req.user.reportingTo,
+      approver: approverId,
       date: startOfDay(date),
       requestedCheckIn: requestedCheckIn || undefined,
       requestedCheckOut: requestedCheckOut || undefined,
@@ -127,7 +129,10 @@ const reviewRequest = (newStatus) => async (req, res) => {
       message: `Your attendance regularisation request was ${verb} by ${req.user.name}.`,
       link: '/approval-history',
     });
-    if (req.user.reportingTo) {
+    // Skip the cascade if it would just notify the requester a second time
+    // (e.g. HR approving the CEO's own regularisation, where HR's own
+    // reportingTo is that same CEO).
+    if (req.user.reportingTo && req.user.reportingTo.toString() !== request.user._id.toString()) {
       await Notification.notify({
         user: req.user.reportingTo,
         type: `regularisation-${newStatus}`,

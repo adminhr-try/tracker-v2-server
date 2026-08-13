@@ -4,6 +4,7 @@ const Attendance = require('../models/Attendance');
 const Notification = require('../models/Notification');
 const { CAN_APPROVE } = require('../config/roles');
 const { startOfDayIST, getISTYear, yearRangeIST } = require('../utils/dateUtils');
+const { resolveApprover } = require('../utils/approverUtils');
 
 const ANNUAL_QUOTA = { CL: 12, SL: 12, WFH: 12 };
 
@@ -53,7 +54,8 @@ exports.createRequest = async (req, res) => {
   try {
     const { leaveType, fromDate, toDate, reason, dayPart } = req.body;
 
-    if (!req.user.reportingTo) {
+    const approverId = await resolveApprover(req.user);
+    if (!approverId) {
       return res.status(400).json({ message: 'No approver configured for your account. Contact admin.' });
     }
     if (!['CL', 'SL'].includes(leaveType)) {
@@ -93,7 +95,7 @@ exports.createRequest = async (req, res) => {
 
     const request = await LeaveRequest.create({
       user: req.user._id,
-      approver: req.user.reportingTo, // never trust client-supplied approver
+      approver: approverId, // never trust client-supplied approver
       leaveType,
       fromDate,
       toDate,
@@ -162,7 +164,10 @@ const reviewRequest = (newStatus) => async (req, res) => {
       message: `Your ${request.leaveType} request was ${verb} by ${req.user.name}.`,
       link: '/approval-history',
     });
-    if (req.user.reportingTo) {
+    // Skip the cascade if it would just notify the requester a second time
+    // (e.g. HR approving the CEO's own leave, where HR's own reportingTo is
+    // that same CEO).
+    if (req.user.reportingTo && req.user.reportingTo.toString() !== request.user._id.toString()) {
       await Notification.notify({
         user: req.user.reportingTo,
         type: `leave-${newStatus}`,
